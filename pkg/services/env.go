@@ -13,7 +13,7 @@ type Env struct {
 	LlamaLibs    string `env:"LLAMA_LIBS,notEmpty" envDefault:"~/Projects/local_ai/llama.cpp/builds/vulkan/bin"`
 	ModelDir     string `env:"MODEL_DIR,notEmpty" envDefault:"~/.cache/llama.cpp/"`
 	ModelName    string `env:"MODEL_NAME,notEmpty" envDefault:"ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"`
-	ModelNCtx    int    `env:"MODEL_NCTX" envDefault:"2"`
+	ModelNCtx    int    `env:"MODEL_NCTX" envDefault:"5"`
 	ModelCtxSize int    `env:"MODEL_CTX_SIZE" envDefault:"20000"`
 }
 

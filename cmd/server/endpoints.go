@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"goons/pkg/services"
 	"io"
 	"net/http"
@@ -12,7 +13,9 @@ func StreamingInferenceHandler(i services.Inferer) func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var q AIPrompt
 		c.ShouldBindJSON(&q)
-		resChannel := i.StreamInference(q.Question)
+		ctx, cancel := context.WithCancel(c.Copy().Request.Context())
+		defer cancel()
+		resChannel := i.StreamInference(q.Question, ctx)
 		c.Stream(func(w io.Writer) bool {
 			select {
 			case word, ok := <-resChannel:

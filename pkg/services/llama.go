@@ -3,6 +3,7 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -16,13 +17,14 @@ import (
 // text to text inference interface
 type Inferer interface {
 	Infer(prompt string) string
-	StreamInference(prompt string) chan string
+	StreamInference(prompt string, ctx context.Context) chan string
 	Init() error
 	Close()
 }
 
 type inferenceTask struct {
 	prompt          string
+	ctx             context.Context
 	responseChannel chan string
 }
 
@@ -56,11 +58,12 @@ func (ie *inferenceEngine) Infer(prompt string) string {
 // starts new inference request and returns channel with the resulting tokens
 // tokens are streamed for real-time systems
 // blocks until the request inference starts
-func (ie *inferenceEngine) StreamInference(prompt string) chan string {
+func (ie *inferenceEngine) StreamInference(prompt string, ctx context.Context) chan string {
 	ch := make(chan string)
 	task := inferenceTask{
 		prompt:          prompt,
 		responseChannel: ch,
+		ctx:             ctx,
 	}
 
 	ie.promptChannel <- task
@@ -94,7 +97,7 @@ func (i *inferenceEngine) loadLlamaLibs() error {
 
 	err := llama.Load(i.env.LlamaLibs)
 	if err != nil {
-		slog.Error("Can't load llama .so libs: %s", err)
+		fmt.Printf("Can't load llama .so libs: %s", err.Error())
 		return err
 	}
 	slog.Info(fmt.Sprintf("llama.cpp .so libs loaded in %.0e sec\n", time.Since(st).Seconds()))
@@ -230,7 +233,7 @@ func genTokens(prompt string, ctx *llamaContext) func(func(string) bool) {
 			len := llama.TokenToPiece(ctx.vocab, token, decodedToken, 0, true)
 			decodedToken = decodedToken[:len]
 			answer.WriteString(string(decodedToken))
-			fmt.Println(answer.String())
+			// fmt.Println(answer.String())
 			batch = llama.BatchGetOne([]llama.Token{token})
 			messages, err := parser.ParseResponse(answer.String())
 			if err != nil {
@@ -257,15 +260,22 @@ func genTokens(prompt string, ctx *llamaContext) func(func(string) bool) {
 
 func listenAndInfer(c chan inferenceTask, lc *llamaContext) {
 	for {
-		select {
-		case task := <-c:
-			task.prompt = CreateGPTOSSPrompt("", "", task.prompt)
-			for s := range genTokens(task.prompt, lc) {
+		task := <-c
+		fmt.Printf("Task %q received\n", task.prompt)
+		task.prompt = CreateGPTOSSPrompt("", "", task.prompt)
+	gen:
+		for s := range genTokens(task.prompt, lc) {
+			select {
+			case <-task.ctx.Done():
+				slog.Info("Inference Cancelled")
 				task.responseChannel <- s
+				break gen
+			case task.responseChannel <- s:
+				// fmt.Println(s)
 			}
-			close(task.responseChannel)
-			llama.Free(lc.context)
-			lc.createContext()
 		}
+		close(task.responseChannel)
+		llama.Free(lc.context)
+		lc.createContext()
 	}
 }
