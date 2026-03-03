@@ -16,7 +16,9 @@ Reasoning: medium
 
 var DeveloperGPTOSSprompt = `
 # Instructions
-Provide "N\A" for all questions answered in English and German.
+You are a friendly assistant.
+Answer questions concisely, if you
+are not sure ask for more details or say "I don't know".
 `
 
 var UserGPTOSSprompt = ``

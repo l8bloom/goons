@@ -3,13 +3,14 @@
 package services
 
 type DI struct {
-	Env             EnvProvider
+	Env             Env
 	InferenceEngine Inferer
 }
 
 func NewDI() DI {
 	var di DI
-	var env Env
+
+	env := NewEnv()
 	di.Env = env
 
 	ie := NewInferenceEngine(env)

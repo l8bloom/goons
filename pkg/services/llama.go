@@ -13,15 +13,12 @@ import (
 	"github.com/kultivator-consulting/goharmony"
 )
 
+// text to text inference interface
 type Inferer interface {
 	Infer(prompt string) string
 	StreamInference(prompt string) chan string
 	Init() error
 	Close()
-}
-
-func NewInferenceEngine(env EnvProvider) *inferenceEngine {
-	return &inferenceEngine{env: env}
 }
 
 type inferenceTask struct {
@@ -32,8 +29,12 @@ type inferenceTask struct {
 // one implementation of Inferer interface
 type inferenceEngine struct {
 	promptChannel chan inferenceTask
-	modelLoaded   bool
-	env           EnvProvider
+	model         *llamaModel
+	env           Env
+}
+
+func NewInferenceEngine(env Env) *inferenceEngine {
+	return &inferenceEngine{env: env}
 }
 
 func (i *inferenceEngine) Init() error {
@@ -44,17 +45,18 @@ func (i *inferenceEngine) Init() error {
 	return nil
 }
 
-func (ie inferenceEngine) Close() {
+func (ie *inferenceEngine) Close() {
 	llama.Close()
 }
 
-func (ie inferenceEngine) Infer(prompt string) string {
+func (ie *inferenceEngine) Infer(prompt string) string {
 	return "abc"
 }
 
-// sends new inference request and returns channel with the resulting tokens
+// starts new inference request and returns channel with the resulting tokens
 // tokens are streamed for real-time systems
-func (ie inferenceEngine) StreamInference(prompt string) chan string {
+// blocks until the request inference starts
+func (ie *inferenceEngine) StreamInference(prompt string) chan string {
 	ch := make(chan string)
 	task := inferenceTask{
 		prompt:          prompt,
@@ -65,60 +67,124 @@ func (ie inferenceEngine) StreamInference(prompt string) chan string {
 	return task.responseChannel
 }
 
-type llamaModel struct {
-	model llama.Model
-	vocab llama.Vocab
+// loads llama .so libs and inits it
+func (i *inferenceEngine) initLlama() error {
+	st := time.Now()
+	if err := i.loadLlamaLibs(); err != nil {
+		return fmt.Errorf("initLlama failed to load llama.so. %s", err)
+	}
+	slog.Info(fmt.Sprintf("Llama libs loaded in %.0e sec\n", time.Since(st).Seconds()))
+	llama.Init()
+
+	llama.LogSet(llama.LogSilent()) // TODO: dedice on llama's log content
+
+	lm := newLlamaModel(i.env)
+	ch, err := lm.deployModel()
+	if err != nil {
+		return fmt.Errorf("initLlama failed to deploy models.  %s", err)
+	}
+	i.model = lm
+	i.promptChannel = ch
+	slog.Info(fmt.Sprintf("Llama engine initialized in %.0e sec\n", time.Since(st).Seconds()))
+	return nil
 }
 
-// kind of hardcoded for now
-func (lm *llamaModel) loadModel(e EnvProvider) error {
-	if lm.model != 0 {
-		return nil
-	}
-	modelDir := e.GetEnv().ModelDir
-	modelName := e.GetEnv().ModelName
-	llama.LogSet(llama.LogSilent())
+func (i *inferenceEngine) loadLlamaLibs() error {
 	st := time.Now()
-	model, err := llama.ModelLoadFromFile(filepath.Join(modelDir, modelName), llama.ModelDefaultParams())
+
+	err := llama.Load(i.env.LlamaLibs)
+	if err != nil {
+		slog.Error("Can't load llama .so libs: %s", err)
+		return err
+	}
+	slog.Info(fmt.Sprintf("llama.cpp .so libs loaded in %.0e sec\n", time.Since(st).Seconds()))
+	return nil
+}
+
+type llamaModel struct {
+	model    llama.Model
+	vocab    llama.Vocab
+	contexts []llamaContext
+	env      Env
+}
+
+func newLlamaModel(env Env) *llamaModel {
+	return &llamaModel{env: env}
+}
+
+// load model to gpu and return the prompt channel
+func (lm *llamaModel) deployModel() (chan inferenceTask, error) {
+	if err := lm.loadModel(); err != nil {
+		return nil, err
+	}
+	lm.loadVocab()
+	if err := lm.createContexts(); err != nil {
+		return nil, err
+	}
+	c, err := lm.run()
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (lm *llamaModel) loadModel() error {
+	st := time.Now()
+	modelPath := filepath.Join(lm.env.ModelDir, lm.env.ModelName)
+	model, err := llama.ModelLoadFromFile(modelPath, llama.ModelDefaultParams())
 	if err != nil {
 		return fmt.Errorf("initLlama failed to load llama.so. %s", err)
 	}
-	slog.Info(fmt.Sprintf("%q model loaded in %.0e sec\n", modelName, time.Since(st).Seconds()))
+	slog.Info(fmt.Sprintf("%q model loaded in %.0e sec\n", lm.env.ModelName, time.Since(st).Seconds()))
 	lm.model = model
 	return nil
 }
 
 func (lm *llamaModel) loadVocab() {
-	if lm.vocab != 0 {
-		return
-	}
 	st := time.Now()
 	vocab := llama.ModelGetVocab(lm.model)
 	slog.Info(fmt.Sprintf("model's vocabular fetched in %.0e sec\n", time.Since(st).Seconds()))
 	lm.vocab = vocab
 }
 
+func (lm *llamaModel) createContexts() error {
+	st := time.Now()
+	contexts := make([]llamaContext, 0, 10)
+	for range lm.env.ModelNCtx {
+		context, err := newLlamaContext(*lm)
+		if err != nil {
+			return nil
+		}
+		contexts = append(contexts, context)
+	}
+	slog.Info(fmt.Sprintf("Created %d model's contexts in %.0e sec\n", lm.env.ModelNCtx, time.Since(st).Seconds()))
+	lm.contexts = contexts
+	return nil
+}
+
 type llamaContext struct {
-	llamaModel
+	model   llama.Model
+	vocab   llama.Vocab
 	context llama.Context
 	batch   llama.Batch
 	sampler llama.Sampler
+	env     Env
 }
 
-func newContext(lm llamaModel) (llamaContext, error) {
-	var lc llamaContext
-	lc.llamaModel = lm
+func newLlamaContext(lm llamaModel) (llamaContext, error) {
+	lc := new(llamaContext{model: lm.model, vocab: lm.vocab, env: lm.env})
 	if err := lc.createContext(); err != nil {
-		return lc, err
+		return *lc, err
 	}
 	lc.loadSampler()
-	return lc, nil
+	return *lc, nil
 }
 
 func (lc *llamaContext) createContext() error {
-	ctxParams := llama.ContextDefaultParams()
-	ctxParams.NCtx = 20_000
 	st := time.Now()
+	ctxParams := llama.ContextDefaultParams()
+	ctxParams.NCtx = uint32(lc.env.ModelCtxSize)
+
 	ctx, err := llama.InitFromModel(lc.model, ctxParams)
 	slog.Info(fmt.Sprintf("model's context created in %.0e sec\n", time.Since(st).Seconds()))
 	if err != nil {
@@ -129,9 +195,6 @@ func (lc *llamaContext) createContext() error {
 }
 
 func (lc *llamaContext) loadSampler() {
-	if lc.sampler != 0 {
-		return
-	}
 	st := time.Now()
 	sampler := llama.SamplerChainInit(llama.SamplerChainDefaultParams())
 	llama.SamplerChainAdd(sampler, llama.SamplerInitGreedy())
@@ -139,56 +202,15 @@ func (lc *llamaContext) loadSampler() {
 	lc.sampler = sampler
 }
 
-// loads llama .so libs and inits it
-func (i *inferenceEngine) initLlama() error {
-	st := time.Now()
-	if err := i.loadLlamaLibs(); err != nil {
-		return fmt.Errorf("initLlama failed to load llama.so. %s", err)
-	}
-	slog.Info(fmt.Sprintf("Llama libs loaded in %.0e sec\n", time.Since(st).Seconds()))
-
-	st = time.Now()
-	llama.Init()
-	slog.Info(fmt.Sprintf("Llama engine initialized in %.0e sec\n", time.Since(st).Seconds()))
-
-	ch, err := deployModels(i.env)
-	if err != nil {
-		return fmt.Errorf("initLlama failed to deploy models.  %s", err)
-	}
-	i.promptChannel = ch
-	i.modelLoaded = true
-	return nil
-}
-
-func (i *inferenceEngine) loadLlamaLibs() error {
-	st := time.Now()
-
-	err := llama.Load(i.env.GetEnv().LlamaLibs)
-	if err != nil {
-		slog.Error("Can't load llama .so libs: %s", err)
-		return err
-	}
-	slog.Info(fmt.Sprintf("llama.cpp .so libs loaded in %.0e sec\n", time.Since(st).Seconds()))
-	return nil
-}
-
-// only one atm but with two contexts
-func deployModels(e EnvProvider) (chan inferenceTask, error) {
-	var lm llamaModel
-	if err := lm.loadModel(e); err != nil {
-		slog.Error("Can't load model: %s", err)
-		return nil, err
-	}
-	lm.loadVocab()
+func (lm *llamaModel) run() (chan inferenceTask, error) {
 	inferenceChannel := make(chan inferenceTask)
-	// only two goroutines
-	for range 5 {
-		go listenAndInfer(inferenceChannel, lm)
+	for _, c := range lm.contexts {
+		go listenAndInfer(inferenceChannel, &c)
 	}
 	return inferenceChannel, nil
 }
 
-func genTokens(prompt string, ctx llamaContext) func(func(string) bool) {
+func genTokens(prompt string, ctx *llamaContext) func(func(string) bool) {
 	return func(yield func(string) bool) {
 		parser := goharmony.NewParser()
 		var analysis, answer, final_answer strings.Builder
@@ -208,7 +230,7 @@ func genTokens(prompt string, ctx llamaContext) func(func(string) bool) {
 			len := llama.TokenToPiece(ctx.vocab, token, decodedToken, 0, true)
 			decodedToken = decodedToken[:len]
 			answer.WriteString(string(decodedToken))
-			// fmt.Println(answer.String())
+			fmt.Println(answer.String())
 			batch = llama.BatchGetOne([]llama.Token{token})
 			messages, err := parser.ParseResponse(answer.String())
 			if err != nil {
@@ -233,21 +255,17 @@ func genTokens(prompt string, ctx llamaContext) func(func(string) bool) {
 	}
 }
 
-func listenAndInfer(c chan inferenceTask, lm llamaModel) {
+func listenAndInfer(c chan inferenceTask, lc *llamaContext) {
 	for {
-		ctx, err := newContext(lm)
-		if err != nil {
-			slog.Warn("Error creating new llama context; skipping", err)
-			return
-		}
 		select {
 		case task := <-c:
 			task.prompt = CreateGPTOSSPrompt("", "", task.prompt)
-			for s := range genTokens(task.prompt, ctx) {
+			for s := range genTokens(task.prompt, lc) {
 				task.responseChannel <- s
 			}
 			close(task.responseChannel)
-			llama.Free(ctx.context)
+			llama.Free(lc.context)
+			lc.createContext()
 		}
 	}
 }

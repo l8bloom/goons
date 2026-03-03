@@ -9,21 +9,15 @@ import (
 	"github.com/mitchellh/go-homedir"
 )
 
-type EnvProvider interface {
-	GetEnv() Env
-}
-
 type Env struct {
-	loaded    bool
-	LlamaLibs string `env:"LLAMA_LIBS,notEmpty" envDefault:"~/Projects/local_ai/llama.cpp/builds/vulkan/bin"`
-	ModelDir  string `env:"MODEL_DIR,notEmpty" envDefault:"~/.cache/llama.cpp/"`
-	ModelName string `env:"MODEL_NAME,notEmpty" envDefault:"ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"`
+	LlamaLibs    string `env:"LLAMA_LIBS,notEmpty" envDefault:"~/Projects/local_ai/llama.cpp/builds/vulkan/bin"`
+	ModelDir     string `env:"MODEL_DIR,notEmpty" envDefault:"~/.cache/llama.cpp/"`
+	ModelName    string `env:"MODEL_NAME,notEmpty" envDefault:"ggml-org_gpt-oss-20b-GGUF_gpt-oss-20b-mxfp4.gguf"`
+	ModelNCtx    int    `env:"MODEL_NCTX" envDefault:"2"`
+	ModelCtxSize int    `env:"MODEL_CTX_SIZE" envDefault:"20000"`
 }
 
-func (e Env) GetEnv() Env {
-	if e.loaded {
-		return e
-	}
+func NewEnv() Env {
 	appEnv, err := env.ParseAs[Env]()
 	if err != nil {
 		fmt.Println("Cane parse the OS env vars.", err)
@@ -42,6 +36,5 @@ func (e Env) GetEnv() Env {
 		}
 		field.SetString(expanded)
 	}
-	appEnv.loaded = true
 	return appEnv
 }
