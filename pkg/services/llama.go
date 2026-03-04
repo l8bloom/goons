@@ -3,29 +3,29 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"iter"
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/hybridgroup/yzma/pkg/llama"
-	"github.com/kultivator-consulting/goharmony"
 )
 
-// text to text inference interface
-type Inferer interface {
-	Infer(prompt string) string
-	StreamInference(prompt string, ctx context.Context) chan string
-	Init() error
-	Close()
-}
+type inferenceType string
+
+const (
+	streamingInference inferenceType = "streaming"
+	absoluteInference  inferenceType = "absolute"
+)
 
 type inferenceTask struct {
-	prompt          string
+	prompt          []Message
 	ctx             context.Context
 	responseChannel chan string
+	inference       inferenceType
 }
 
 // one implementation of Inferer interface
@@ -51,19 +51,29 @@ func (ie *inferenceEngine) Close() {
 	llama.Close()
 }
 
-func (ie *inferenceEngine) Infer(prompt string) string {
-	return "abc"
-}
-
-// starts new inference request and returns channel with the resulting tokens
-// tokens are streamed for real-time systems
-// blocks until the request inference starts
-func (ie *inferenceEngine) StreamInference(prompt string, ctx context.Context) chan string {
+func (ie *inferenceEngine) Infer(prompt []Message, ctx context.Context) chan string {
 	ch := make(chan string)
 	task := inferenceTask{
 		prompt:          prompt,
 		responseChannel: ch,
 		ctx:             ctx,
+		inference:       absoluteInference,
+	}
+	ie.promptChannel <- task
+	return task.responseChannel
+
+}
+
+// starts new inference request and returns channel with the resulting tokens
+// tokens are streamed for real-time systems
+// blocks until the inference request starts
+func (ie *inferenceEngine) StreamInference(prompt []Message, ctx context.Context) chan string {
+	ch := make(chan string)
+	task := inferenceTask{
+		prompt:          prompt,
+		responseChannel: ch,
+		ctx:             ctx,
+		inference:       streamingInference,
 	}
 
 	ie.promptChannel <- task
@@ -165,17 +175,30 @@ func (lm *llamaModel) createContexts() error {
 	return nil
 }
 
+func (lm *llamaModel) run() (chan inferenceTask, error) {
+	inferenceChannel := make(chan inferenceTask)
+	for _, c := range lm.contexts {
+		go listenAndInfer(inferenceChannel, &c)
+	}
+	return inferenceChannel, nil
+}
+
 type llamaContext struct {
 	model   llama.Model
 	vocab   llama.Vocab
 	context llama.Context
 	batch   llama.Batch
 	sampler llama.Sampler
+	ct      *chatTemplate
 	env     Env
 }
 
 func newLlamaContext(lm llamaModel) (llamaContext, error) {
-	lc := new(llamaContext{model: lm.model, vocab: lm.vocab, env: lm.env})
+	lc := &llamaContext{
+		model: lm.model,
+		vocab: lm.vocab,
+		env:   lm.env,
+	}
 	if err := lc.createContext(); err != nil {
 		return *lc, err
 	}
@@ -205,56 +228,102 @@ func (lc *llamaContext) loadSampler() {
 	lc.sampler = sampler
 }
 
-func (lm *llamaModel) run() (chan inferenceTask, error) {
-	inferenceChannel := make(chan inferenceTask)
-	for _, c := range lm.contexts {
-		go listenAndInfer(inferenceChannel, &c)
-	}
-	return inferenceChannel, nil
+func (lc *llamaContext) createChatTemplate(m []Message, i inferenceType) {
+	lc.ct = newChatTemplate(lc.env, m, i)
 }
 
-func genTokens(prompt string, ctx *llamaContext) func(func(string) bool) {
-	return func(yield func(string) bool) {
-		parser := goharmony.NewParser()
-		var analysis, answer, final_answer strings.Builder
+func (lc *llamaContext) genTokens(prompt string) iter.Seq[[]byte] {
+	return func(yield func([]byte) bool) {
 		fmt.Println("Starting inference")
-		// st := time.Now()
-		tokens := llama.Tokenize(ctx.vocab, prompt, true, false)
+		tokens := llama.Tokenize(lc.vocab, prompt, true, false)
 		batch := llama.BatchGetOne(tokens)
-		ctx.batch = batch
+		lc.batch = batch
 		for {
-			llama.Decode(ctx.context, batch)                           // one inference step
-			token := llama.SamplerSample(ctx.sampler, ctx.context, -1) // grab the generated token from the KV
+			// one inference step
+			llama.Decode(lc.context, batch)
+			// grab the generated token from the KV
+			token := llama.SamplerSample(lc.sampler, lc.context, -1)
 
-			if llama.VocabIsEOG(ctx.vocab, token) {
+			if llama.VocabIsEOG(lc.vocab, token) {
 				return
 			}
 			decodedToken := make([]byte, 50)
-			len := llama.TokenToPiece(ctx.vocab, token, decodedToken, 0, true)
+			len := llama.TokenToPiece(lc.vocab, token, decodedToken, 0, true)
 			decodedToken = decodedToken[:len]
-			answer.WriteString(string(decodedToken))
-			// fmt.Println(answer.String())
+			if !yield(decodedToken) {
+				return
+			}
 			batch = llama.BatchGetOne([]llama.Token{token})
-			messages, err := parser.ParseResponse(answer.String())
-			if err != nil {
-				fmt.Println("error: ", err)
-				continue // Wait for more data
-			}
-			if !strings.Contains(answer.String(), ">final<") {
-				continue
-			}
-			for _, msg := range messages {
-				if msg.Channel == goharmony.ChannelFinal || msg.Content == "" {
-					final_answer.Write(decodedToken)
-					if !yield(string(decodedToken)) {
-						return
-					}
-				}
-				if msg.Channel == goharmony.ChannelAnalysis || msg.Content == "" {
-					analysis.Write(decodedToken)
-				}
-			}
 		}
+	}
+}
+
+type chatTemplateType string
+
+const (
+	harmonyTemplate chatTemplateType = "harmony"
+	chatMLTemplate  chatTemplateType = "chatML"
+)
+
+type chatTemplate struct {
+	chatType     chatTemplateType
+	inference    inferenceType
+	messages     []Message
+	lastStreamed string       // stores last streaming inference result
+	rawAnswer    bytes.Buffer // stores entire AI output
+}
+
+func newChatTemplate(e Env, m []Message, i inferenceType) *chatTemplate {
+	ct := &chatTemplate{messages: m, inference: i}
+	switch e.ModelChatTemplate {
+	case string(harmonyTemplate):
+		ct.chatType = harmonyTemplate
+	default:
+		ct.chatType = chatMLTemplate
+	}
+	return ct
+}
+
+// serializes user facing messages
+func (ct *chatTemplate) serializePrompt() string {
+	switch ct.chatType {
+	case harmonyTemplate:
+		return createHarmonyPrompt(ct.messages)
+	case chatMLTemplate:
+		return createChatMLPrompt(ct.messages)
+	default:
+		panic(fmt.Sprintf("Can't serialize prompt, unkown chat template: %q", ct.chatType))
+	}
+}
+
+func (ct *chatTemplate) addWord(word []byte) {
+	ct.rawAnswer.Write(word)
+	// fmt.Println(ct.rawAnswer.String())
+	if ct.chatType == harmonyTemplate {
+		// TODO: this doesn't have to be checked all of the time, fix
+		ready := parseHarmonyStreamIsFinal(ct.rawAnswer.String())
+		if !ready {
+			ct.lastStreamed = ""
+		} else {
+			ct.lastStreamed = string(word)
+		}
+	}
+}
+
+func (ct *chatTemplate) isAbsolute() bool {
+	return ct.inference == absoluteInference
+}
+
+func (ct *chatTemplate) isStreamed() bool {
+	return ct.inference == streamingInference
+}
+
+func (ct *chatTemplate) getAnswer() string {
+	switch ct.inference {
+	case streamingInference:
+		return ct.lastStreamed
+	default:
+		return parseHarmonyAbsIsFinal(ct.rawAnswer.String())
 	}
 }
 
@@ -262,17 +331,25 @@ func listenAndInfer(c chan inferenceTask, lc *llamaContext) {
 	for {
 		task := <-c
 		fmt.Printf("Task %q received\n", task.prompt)
-		task.prompt = CreateGPTOSSPrompt("", "", task.prompt)
+		lc.createChatTemplate(task.prompt, task.inference)
 	gen:
-		for s := range genTokens(task.prompt, lc) {
+		for word := range lc.genTokens(lc.ct.serializePrompt()) {
 			select {
 			case <-task.ctx.Done():
 				slog.Info("Inference Cancelled")
-				task.responseChannel <- s
 				break gen
-			case task.responseChannel <- s:
-				// fmt.Println(s)
+			default:
+				lc.ct.addWord(word)
+				if lc.ct.isAbsolute() {
+					continue
+				}
+				if a := lc.ct.getAnswer(); a != "" {
+					task.responseChannel <- a
+				}
 			}
+		}
+		if lc.ct.isAbsolute() {
+			task.responseChannel <- lc.ct.getAnswer()
 		}
 		close(task.responseChannel)
 		llama.Free(lc.context)
