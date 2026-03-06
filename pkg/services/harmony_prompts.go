@@ -3,27 +3,33 @@ package services
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kultivator-consulting/goharmony"
 )
 
 var systemHarmonyPrompt = `
+<|start|>user<|message|>
 Knowledge cutoff: 2024-06
-Current date: 2026-03-02
+Current date: %s
 
 Reasoning: medium
 
-# Valid channels: analysis, commentary, final. Channel must be included for every message.
+# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>
 `
 
 var developerHarmonyPrompt = `
+<|start|>developer<|message|>
 # Instructions
 You are a friendly assistant.
 Answer questions concisely, if you
-are not sure ask for more details or say "I don't know".
+are not sure ask for more details or say "I don't know".<|end|>
 `
 
-var userHarmonyPrompt = ``
+var userHarmonyPrompt = `
+<|start|>developer<|message|>
+%s<|end|>
+`
 
 var assistantHarmonyPromptStart = `
 <|start|>assistant
@@ -35,12 +41,12 @@ var assistantHarmonyPromptComplete = `
 
 // generates prompt dynamically for flexibiliy
 func createHarmonyPrompt(msgs []Message) string {
-	header := "<|start|>%s<|message|>%s<|end|>"
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, header, "system", systemHarmonyPrompt)
-	fmt.Fprintf(&prompt, header, "developer", developerHarmonyPrompt)
+	now := time.Now().Format("2006-01")
+	fmt.Fprintf(&prompt, systemHarmonyPrompt, now)
+	fmt.Fprint(&prompt, developerHarmonyPrompt)
 	for _, msg := range msgs {
-		fmt.Fprintf(&prompt, header, "user", msg.user)
+		fmt.Fprintf(&prompt, userHarmonyPrompt, msg.user)
 		// TODO: fix for ai msg which errored out,
 		// this check should be on the last received message instead
 		if msg.ai == "" {

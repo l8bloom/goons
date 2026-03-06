@@ -177,6 +177,7 @@ func (lm *llamaModel) createContexts() error {
 
 func (lm *llamaModel) run() (chan inferenceTask, error) {
 	inferenceChannel := make(chan inferenceTask)
+	// gpu workers pool
 	for _, c := range lm.contexts {
 		go listenAndInfer(inferenceChannel, &c)
 	}
@@ -343,8 +344,8 @@ func listenAndInfer(c chan inferenceTask, lc *llamaContext) {
 				if lc.ct.isAbsolute() {
 					continue
 				}
-				if a := lc.ct.getAnswer(); a != "" {
-					task.responseChannel <- a
+				if s := lc.ct.getAnswer(); s != "" {
+					task.responseChannel <- s
 				}
 			}
 		}
@@ -355,4 +356,5 @@ func listenAndInfer(c chan inferenceTask, lc *llamaContext) {
 		llama.Free(lc.context)
 		lc.createContext()
 	}
+
 }
