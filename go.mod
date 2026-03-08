@@ -1,16 +1,14 @@
-module goons
+module github.com/l8bloom/goons
 
-go 1.26
+go 1.25.0
 
 require (
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/hybridgroup/yzma v1.10.0
-	github.com/jupiterrider/ffi v0.5.1
 	github.com/kultivator-consulting/goharmony v0.0.0-20250829214653-cb2832a61494
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/seasonjs/stable-diffusion v0.2.0
-	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -27,6 +25,7 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/jupiterrider/ffi v0.5.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -41,6 +40,7 @@ require (
 	golang.org/x/arch v0.22.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
